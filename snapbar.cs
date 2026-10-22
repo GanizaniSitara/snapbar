@@ -2,7 +2,7 @@
 // Drag a window toward the top edge of a monitor and a strip of layouts drops down;
 // hover a zone to preview it and release to place the window there. Esc, resizes and
 // drops elsewhere are left to Windows. One process, a tray icon, no services.
-// Set SNAPBAR_LOG=1 to log geometry to %LOCALAPPDATA%\snapbar\snapbar.log.
+// Run with --log (or SNAPBAR_LOG=1) to log geometry and cursor positions to %LOCALAPPDATA%\snapbar\snapbar.log.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -464,8 +464,9 @@ namespace SnapBar
     static class Program
     {
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
+            if (Array.IndexOf(args, "--log") >= 0) Environment.SetEnvironmentVariable("SNAPBAR_LOG", "1");
             bool first;
             using (new Mutex(true, "Local\\SnapBar", out first))
             {
