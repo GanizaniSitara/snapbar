@@ -114,38 +114,64 @@ namespace SnapBar
         }
     }
 
+    // Snap preview: a translucent rounded rectangle slightly inset from the target zone.
     class PreviewForm : OverlayForm
     {
         public PreviewForm()
         {
             BackColor = Color.FromArgb(76, 194, 255);
-            Opacity = 0.30;
+            Opacity = 0.28;
+        }
+        public void ShowZone(Rectangle zone, float scale, IntPtr above)
+        {
+            var r = Rectangle.Inflate(zone, -(int)(8 * scale), -(int)(8 * scale));
+            if (r.Size != Size)
+                using (var path = Shapes.Round(new Rectangle(0, 0, r.Width, r.Height), (int)(8 * scale))) Region = new Region(path);
+            ShowAt(r, above);
         }
         protected override void OnPaint(PaintEventArgs e)
         {
-            using (var pen = new Pen(Color.White, 3)) e.Graphics.DrawRectangle(pen, 1, 1, Width - 3, Height - 3);
+            e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            using (var pen = new Pen(Color.White, 2))
+            using (var path = Shapes.Round(new Rectangle(1, 1, Width - 3, Height - 3), 8))
+                e.Graphics.DrawPath(pen, path);
         }
     }
 
-    // Windows 11-style bar hanging from the top edge: a small pill while dragging, expanding
-    // into the layout panel when the cursor comes up to it.
+    static class Shapes
+    {
+        public static GraphicsPath Round(Rectangle r, int radius)
+        {
+            var p = new GraphicsPath();
+            int d = Math.Max(2, radius * 2);
+            p.AddArc(r.Left, r.Top, d, d, 180, 90);
+            p.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+            p.CloseFigure();
+            return p;
+        }
+    }
+
+    // Windows 11-style snap bar: a small hint pill near the top while dragging, opening into a
+    // compact floating panel of layouts when the cursor comes up to it.
     class StripForm : OverlayForm
     {
-        static readonly Color Back = Color.FromArgb(44, 44, 44), Border = Color.FromArgb(78, 78, 78), Grip = Color.FromArgb(150, 150, 150),
-            CardBack = Color.FromArgb(58, 58, 58), ZoneFill = Color.FromArgb(98, 98, 98), Hot = Color.FromArgb(76, 194, 255);
+        static readonly Color Back = Color.FromArgb(44, 44, 44), Border = Color.FromArgb(80, 80, 80), Grip = Color.FromArgb(160, 160, 160),
+            ZoneFill = Color.FromArgb(105, 105, 105), Hot = Color.FromArgb(76, 194, 255);
 
         public SnapLayout[] Layouts;
         public List<Rectangle[]> ZoneScreenRects = new List<Rectangle[]>(); // per card, in screen coords
         public List<Rectangle> CardScreenRects = new List<Rectangle>();
         public int HotCard = -1, HotZone = -1;
         public bool Expanded;
-        Rectangle final;
+        int pad;
         float scale = 1;
 
         public StripForm() { BackColor = Back; }
 
-        // Lays out the pill or the panel for a monitor; returns its resting bounds in screen coordinates.
-        // It is centred two thirds across the monitor, clear of remote-session toolbars at the centre.
+        // Lays out the pill or the panel for a monitor; returns its bounds in screen coordinates.
+        // Centred two thirds across the monitor, clear of remote-session toolbars at the centre.
         public Rectangle Build(Screen screen, float dpiScale, bool expanded)
         {
             scale = dpiScale;
@@ -154,80 +180,68 @@ namespace SnapBar
             CardScreenRects.Clear();
             ZoneScreenRects.Clear();
             HotCard = HotZone = -1;
-            int cardW = 0, cardH = 0, pad = (int)(12 * scale), w, h;
+            pad = (int)(8 * scale);
+            int cardW = 0, cardH = 0, w, h;
             if (expanded)
             {
                 bool portrait = mon.Height > mon.Width;
                 Layouts = portrait ? SnapLayout.Portrait : SnapLayout.Landscape;
-                cardW = (int)((portrait ? 120 : 200) * scale);
+                cardW = (int)((portrait ? 56 : 96) * scale);
                 cardH = cardW * mon.Height / mon.Width;
                 w = Layouts.Length * cardW + (Layouts.Length + 1) * pad;
                 h = cardH + 2 * pad;
             }
             else
             {
-                w = (int)(120 * scale);
-                h = (int)(14 * scale);
+                w = (int)(96 * scale);
+                h = (int)(10 * scale);
             }
             int left = Math.Max(mon.Left, Math.Min(mon.Right - w, mon.Left + mon.Width * 2 / 3 - w / 2));
-            final = new Rectangle(left, mon.Top, w, h);
+            var bounds = new Rectangle(left, mon.Top + (int)(6 * scale), w, h);
 
-            int inset = (int)(4 * scale), gap = Math.Max(2, (int)(4 * scale));
+            int gap = Math.Max(2, (int)(3 * scale));
             for (int c = 0; expanded && c < Layouts.Length; c++)
             {
-                var card = new Rectangle(final.Left + pad + c * (cardW + pad), final.Top + pad, cardW, cardH);
+                var card = new Rectangle(bounds.Left + pad + c * (cardW + pad), bounds.Top + pad, cardW, cardH);
                 CardScreenRects.Add(card);
-                var area = Rectangle.Inflate(card, -inset, -inset);
                 var zones = new Rectangle[Layouts[c].Zones.Length];
                 for (int z = 0; z < zones.Length; z++)
                 {
                     var f = Layouts[c].Zones[z];
-                    int x0 = area.Left + (int)Math.Round(f.X * area.Width), x1 = area.Left + (int)Math.Round((f.X + f.Width) * area.Width);
-                    int y0 = area.Top + (int)Math.Round(f.Y * area.Height), y1 = area.Top + (int)Math.Round((f.Y + f.Height) * area.Height);
+                    int x0 = card.Left + (int)Math.Round(f.X * card.Width), x1 = card.Left + (int)Math.Round((f.X + f.Width) * card.Width);
+                    int y0 = card.Top + (int)Math.Round(f.Y * card.Height), y1 = card.Top + (int)Math.Round((f.Y + f.Height) * card.Height);
                     zones[z] = Rectangle.FromLTRB(x0 + gap / 2, y0 + gap / 2, x1 - (gap - gap / 2), y1 - (gap - gap / 2));
                 }
                 ZoneScreenRects.Add(zones);
             }
-            using (var path = RoundBottom(new Rectangle(0, 0, w, h), (int)((expanded ? 10 : 7) * scale))) Region = new Region(path);
+            if (Bounds != bounds) Bounds = bounds;
+            using (var path = Shapes.Round(new Rectangle(0, 0, w, h), (int)((expanded ? 8 : 5) * scale))) Region = new Region(path);
             Invalidate();
-            return final;
+            return bounds;
         }
 
-        // Returns true when the hovered zone changed.
+        // Anywhere over a card (including its padding) picks the nearest zone, so there are no
+        // dead gaps that make the preview flicker. Returns true when the hovered zone changed.
         public bool UpdateHot(Point cursor)
         {
             int hc = -1, hz = -1;
-            for (int c = 0; c < ZoneScreenRects.Count && hc < 0; c++)
+            for (int c = 0; c < CardScreenRects.Count && hc < 0; c++)
+            {
+                if (!Rectangle.Inflate(CardScreenRects[c], pad, pad).Contains(cursor)) continue;
+                double best = double.MaxValue;
                 for (int z = 0; z < ZoneScreenRects[c].Length; z++)
-                    if (ZoneScreenRects[c][z].Contains(cursor)) { hc = c; hz = z; break; }
+                {
+                    var r = ZoneScreenRects[c][z];
+                    double dx = Math.Max(0, Math.Max(r.Left - cursor.X, cursor.X - r.Right));
+                    double dy = Math.Max(0, Math.Max(r.Top - cursor.Y, cursor.Y - r.Bottom));
+                    double d = dx * dx + dy * dy;
+                    if (d < best) { best = d; hc = c; hz = z; }
+                }
+            }
             if (hc == HotCard && hz == HotZone) return false;
             HotCard = hc; HotZone = hz;
             Invalidate();
             return true;
-        }
-
-        static GraphicsPath RoundRect(Rectangle r, int radius)
-        {
-            var p = new GraphicsPath();
-            int d = radius * 2;
-            p.AddArc(r.Left, r.Top, d, d, 180, 90);
-            p.AddArc(r.Right - d, r.Top, d, d, 270, 90);
-            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-            p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
-            p.CloseFigure();
-            return p;
-        }
-
-        // Square top edge (flush with the screen edge), rounded bottom corners.
-        static GraphicsPath RoundBottom(Rectangle r, int radius)
-        {
-            var p = new GraphicsPath();
-            int d = radius * 2;
-            p.AddLine(r.Left, r.Top, r.Right, r.Top);
-            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-            p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
-            p.CloseFigure();
-            return p;
         }
 
         protected override void OnPaint(PaintEventArgs e)
@@ -235,30 +249,22 @@ namespace SnapBar
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (var pen = new Pen(Border, Math.Max(1, scale)))
-            using (var path = RoundBottom(new Rectangle(0, -1, Width - 1, Height), (int)((Expanded ? 10 : 7) * scale)))
+            using (var path = Shapes.Round(new Rectangle(0, 0, Width - 1, Height - 1), (int)((Expanded ? 8 : 5) * scale)))
                 g.DrawPath(pen, path);
             if (!Expanded)
             {
-                int gw = (int)(36 * scale), gh = Math.Max(2, (int)(3 * scale));
-                using (var b = new SolidBrush(Grip))
-                using (var path = RoundRect(new Rectangle((Width - gw) / 2, (Height - gh) / 2, gw, gh), Math.Max(1, gh / 2)))
-                    g.FillPath(b, path);
+                int gw = (int)(32 * scale), gh = Math.Max(2, (int)(2 * scale));
+                using (var b = new SolidBrush(Grip)) g.FillRectangle(b, (Width - gw) / 2, (Height - gh) / 2, gw, gh);
                 return;
             }
             for (int c = 0; c < CardScreenRects.Count; c++)
-            {
-                using (var b = new SolidBrush(CardBack))
-                using (var path = RoundRect(ToClient(CardScreenRects[c]), (int)(6 * scale)))
-                    g.FillPath(b, path);
                 for (int z = 0; z < ZoneScreenRects[c].Length; z++)
                     using (var b = new SolidBrush(c == HotCard && z == HotZone ? Hot : ZoneFill))
-                    using (var path = RoundRect(ToClient(ZoneScreenRects[c][z]), (int)(4 * scale)))
+                    using (var path = Shapes.Round(ToClient(ZoneScreenRects[c][z]), (int)(3 * scale)))
                         g.FillPath(b, path);
-            }
         }
 
-        // Relative to the resting position, so content slides with the window.
-        Rectangle ToClient(Rectangle r) { return new Rectangle(r.Left - final.Left, r.Top - final.Top, r.Width, r.Height); }
+        Rectangle ToClient(Rectangle r) { return new Rectangle(r.Left - Left, r.Top - Top, r.Width, r.Height); }
     }
 
     class SnapBarContext : ApplicationContext
@@ -347,22 +353,15 @@ namespace SnapBar
             return Native.GetDpiForMonitor(mon, 0, out dx, out dy) == 0 ? dx / 96f : 1f;
         }
 
-        const int SlideSteps = 6; // 6 x 15 ms drop-down
-        int slideStep = SlideSteps;
         Point lastCursor;
+        float lastScale = 1;
 
         void ShowStrip(bool expanded, float s)
         {
             stripBounds = strip.Build(stripScreen, s, expanded);
-            slideStep = expanded ? 1 : SlideSteps;
-            strip.ShowAt(expanded ? Slid(stripBounds, slideStep) : stripBounds, IntPtr.Zero);
+            strip.ShowAt(stripBounds, IntPtr.Zero);
             if (expanded)
                 Log.Write("strip " + R(stripBounds) + " cards " + string.Join(" ", strip.ZoneScreenRects.ConvertAll(z => string.Join(",", Array.ConvertAll(z, R)))));
-        }
-
-        static Rectangle Slid(Rectangle r, int step)
-        {
-            return new Rectangle(r.Left, r.Top - r.Height + r.Height * step / SlideSteps, r.Width, r.Height);
         }
 
         void Poll()
@@ -373,8 +372,9 @@ namespace SnapBar
             if (p != lastCursor) { Log.Write("cur " + p.X + "," + p.Y); lastCursor = p; }
             var screen = Screen.FromPoint(p);
             float s = DpiScale(p);
+            lastScale = s;
 
-            // The pill follows the drag onto whichever monitor holds the cursor.
+            // The hint pill follows the drag onto whichever monitor holds the cursor.
             if (stripScreen == null || !stripScreen.Equals(screen))
             {
                 HideOverlays();
@@ -382,20 +382,17 @@ namespace SnapBar
                 ShowStrip(false, s);
             }
 
-            // Expand before the cursor reaches the very edge, so the Windows top-edge
-            // maximize preview never starts competing with the panel.
-            bool nearTop = p.Y <= screen.Bounds.Top + (int)(48 * s);
+            var mon = screen.Bounds;
+            bool atEdge = p.Y <= mon.Top + (int)(24 * s);
             if (!strip.Expanded)
             {
-                if (nearTop || Rectangle.Inflate(stripBounds, (int)(80 * s), (int)(60 * s)).Contains(p)) ShowStrip(true, s);
-                return;
+                // Open as soon as the cursor heads up towards the pill, or touches the top edge
+                // anywhere (before Windows starts its own maximize preview).
+                var approach = Rectangle.FromLTRB(stripBounds.Left - (int)(160 * s), mon.Top, stripBounds.Right + (int)(160 * s), mon.Top + (int)(140 * s));
+                if (atEdge || approach.Contains(p)) ShowStrip(true, s);
+                else return;
             }
-            if (slideStep < SlideSteps)
-            {
-                strip.ShowAt(Slid(stripBounds, ++slideStep), IntPtr.Zero);
-                if (slideStep < SlideSteps) return;
-            }
-            if (!nearTop && !Rectangle.Inflate(stripBounds, (int)(40 * s), (int)(40 * s)).Contains(p))
+            if (!atEdge && !Rectangle.Inflate(stripBounds, (int)(56 * s), (int)(56 * s)).Contains(p))
             {
                 if (preview.Visible) preview.Hide();
                 ShowStrip(false, s);
@@ -404,7 +401,7 @@ namespace SnapBar
             if (strip.UpdateHot(p))
             {
                 if (strip.HotCard < 0) preview.Hide();
-                else preview.ShowAt(ZoneRect(stripScreen, strip.Layouts[strip.HotCard].Zones[strip.HotZone]), strip.Handle);
+                else preview.ShowZone(ZoneRect(stripScreen, strip.Layouts[strip.HotCard].Zones[strip.HotZone]), s, strip.Handle);
             }
         }
 
