@@ -349,6 +349,7 @@ namespace SnapBar
 
         const int SlideSteps = 6; // 6 x 15 ms drop-down
         int slideStep = SlideSteps;
+        Point lastCursor;
 
         void ShowStrip(bool expanded, float s)
         {
@@ -369,6 +370,7 @@ namespace SnapBar
             Native.POINT np;
             Native.GetCursorPos(out np);
             var p = new Point(np.X, np.Y);
+            if (p != lastCursor) { Log.Write("cur " + p.X + "," + p.Y); lastCursor = p; }
             var screen = Screen.FromPoint(p);
             float s = DpiScale(p);
 
