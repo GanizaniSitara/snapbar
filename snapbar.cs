@@ -29,6 +29,7 @@ namespace SnapBar
         [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr hwnd, IntPtr after, int x, int y, int w, int h, uint flags);
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int cmd);
         [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hwnd);
+        [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hwnd, int cmd);
         [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern IntPtr GetAncestor(IntPtr hwnd, uint flags);
         [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hwnd, out uint pid);
@@ -42,7 +43,7 @@ namespace SnapBar
 
         public const uint EVENT_SYSTEM_MOVESIZESTART = 0x000A, EVENT_SYSTEM_MOVESIZEEND = 0x000B;
         public const uint WINEVENT_OUTOFCONTEXT = 0, WINEVENT_SKIPOWNPROCESS = 2;
-        public const uint SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_NOMOVE = 0x2, SWP_NOSIZE = 0x1;
+        public const uint SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_NOMOVE = 0x2, SWP_NOSIZE = 0x1, SWP_ASYNCWINDOWPOS = 0x4000;
         public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
         public const int GWL_STYLE = -16, WS_THICKFRAME = 0x40000, SW_RESTORE = 9;
         public const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
@@ -53,15 +54,43 @@ namespace SnapBar
         static readonly string path = Environment.GetEnvironmentVariable("SNAPBAR_LOG") == "1"
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "snapbar", "snapbar.log") : null;
 
+        static readonly System.Text.StringBuilder buffer = new System.Text.StringBuilder();
+
+        public static bool Enabled { get { return path != null; } }
+
+        // Buffered in memory; file writes happen only on Flush (drag end), never mid-drag.
         public static void Write(string msg)
         {
             if (path == null) return;
-            try
+            buffer.Append(DateTime.Now.ToString("HH:mm:ss.fff ")).Append(msg).Append(Environment.NewLine);
+        }
+
+        static readonly System.Collections.Concurrent.ConcurrentQueue<string> pending = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        static readonly object fileLock = new object();
+
+        // Writes on a worker thread so disk or antivirus latency never reaches the UI thread;
+        // chunks are queued and drained in order under one lock.
+        public static void Flush()
+        {
+            if (path == null || buffer.Length == 0) return;
+            pending.Enqueue(buffer.ToString());
+            buffer.Clear();
+            ThreadPool.QueueUserWorkItem(delegate
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-                File.AppendAllText(path, DateTime.Now.ToString("HH:mm:ss.fff ") + msg + Environment.NewLine);
-            }
-            catch (IOException) { }
+                lock (fileLock)
+                {
+                    string text;
+                    while (pending.TryDequeue(out text))
+                    {
+                        try
+                        {
+                            Directory.CreateDirectory(Path.GetDirectoryName(path));
+                            File.AppendAllText(path, text);
+                        }
+                        catch (IOException) { }
+                    }
+                }
+            });
         }
     }
 
@@ -103,9 +132,29 @@ namespace SnapBar
                 return cp;
             }
         }
+        // Debug: time painting, the only work done outside the poll tick.
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg != 0x000F || !Log.Enabled) { base.WndProc(ref m); return; }
+            var sw = Stopwatch.StartNew();
+            base.WndProc(ref m);
+            if (sw.ElapsedMilliseconds > 15) Log.Write("paint " + GetType().Name + " " + sw.ElapsedMilliseconds + "ms");
+        }
+
+        // Replaces the window shape, freeing the previous region's GDI handle.
+        protected void SetShape(GraphicsPath path)
+        {
+            var old = Region;
+            Region = new Region(path);
+            if (old != null) old.Dispose();
+        }
+
         // Shows at r directly below `above` in z-order (or at the top of the topmost band), in one call.
+        public static bool NoUi; // debug: --no-ui runs the logic and logging without showing anything
+
         public void ShowAt(Rectangle r, IntPtr above)
         {
+            if (NoUi) return;
             if (!IsHandleCreated) CreateHandle();
             if (Bounds == r && Visible) return;
             Native.SetWindowPos(Handle, above == IntPtr.Zero ? Native.HWND_TOPMOST : above, r.Left, r.Top, r.Width, r.Height,
@@ -126,7 +175,7 @@ namespace SnapBar
         {
             var r = Rectangle.Inflate(zone, -(int)(8 * scale), -(int)(8 * scale));
             if (r.Size != Size)
-                using (var path = Shapes.Round(new Rectangle(0, 0, r.Width, r.Height), (int)(8 * scale))) Region = new Region(path);
+                using (var path = Shapes.Round(new Rectangle(0, 0, r.Width, r.Height), (int)(8 * scale))) SetShape(path);
             ShowAt(r, above);
         }
         protected override void OnPaint(PaintEventArgs e)
@@ -215,7 +264,7 @@ namespace SnapBar
                 ZoneScreenRects.Add(zones);
             }
             if (Bounds != bounds) Bounds = bounds;
-            using (var path = Shapes.Round(new Rectangle(0, 0, w, h), (int)((expanded ? 8 : 5) * scale))) Region = new Region(path);
+            using (var path = Shapes.Round(new Rectangle(0, 0, w, h), (int)((expanded ? 8 : 5) * scale))) SetShape(path);
             Invalidate();
             return bounds;
         }
@@ -290,7 +339,27 @@ namespace SnapBar
             var menu = new ContextMenuStrip();
             menu.Items.Add("Exit SnapBar", null, delegate { ExitThread(); });
             tray = new NotifyIcon { Icon = MakeIcon(), Text = "SnapBar", ContextMenuStrip = menu, Visible = true };
-            Log.Write("started, hook=" + hook);
+            WarmUp();
+            Log.Write("started, hook=" + hook); Log.Flush();
+        }
+
+        // Create, lay out and paint both overlays once, off-screen, so the first drag opens instantly.
+        void WarmUp()
+        {
+            var sw = Stopwatch.StartNew();
+            var screen = Screen.PrimaryScreen;
+            var far = new Point(-32000, -32000);
+            foreach (bool expanded in new[] { false, true })
+            {
+                var r = strip.Build(screen, 1, expanded);
+                strip.ShowAt(new Rectangle(far, r.Size), IntPtr.Zero);
+                strip.Update();
+            }
+            strip.Hide();
+            preview.ShowZone(new Rectangle(far, new Size(400, 300)), 1, IntPtr.Zero);
+            preview.Update();
+            preview.Hide();
+            Log.Write("warm-up " + sw.ElapsedMilliseconds + "ms");
         }
 
         static Icon MakeIcon()
@@ -322,7 +391,7 @@ namespace SnapBar
             if (evt == Native.EVENT_SYSTEM_MOVESIZESTART)
             {
                 var root = Native.GetAncestor(hwnd, 2 /* GA_ROOT */);
-                if (IsSnappableMove(root)) { dragged = root; poll.Start(); Log.Write("drag start " + root); }
+                if (IsSnappableMove(root)) { dragged = root; tick.Reset(); poll.Start(); Log.Write("drag start " + root); }
             }
             else if (evt == Native.EVENT_SYSTEM_MOVESIZEEND && dragged != IntPtr.Zero)
             {
@@ -364,7 +433,20 @@ namespace SnapBar
                 Log.Write("strip " + R(stripBounds) + " cards " + string.Join(" ", strip.ZoneScreenRects.ConvertAll(z => string.Join(",", Array.ConvertAll(z, R)))));
         }
 
+        readonly Stopwatch tick = new Stopwatch();
+
         void Poll()
+        {
+            // Debug: record when this thread was blocked or a poll ran slow.
+            long since = tick.ElapsedMilliseconds;
+            if (tick.IsRunning && since > 120) Log.Write("stall " + since + "ms");
+            tick.Restart();
+            PollOnce();
+            long spent = tick.ElapsedMilliseconds;
+            if (spent > 30) Log.Write("slow poll " + spent + "ms");
+        }
+
+        void PollOnce()
         {
             Native.POINT np;
             Native.GetCursorPos(out np);
@@ -382,20 +464,18 @@ namespace SnapBar
                 ShowStrip(false, s);
             }
 
-            var mon = screen.Bounds;
-            bool atEdge = p.Y <= mon.Top + (int)(24 * s);
+            // Open when the cursor comes up near the pill; stay open within a strictly larger area.
+            // The close area must contain the open area, or the panel flaps open/shut every tick.
             if (!strip.Expanded)
             {
-                // Open as soon as the cursor heads up towards the pill, or touches the top edge
-                // anywhere (before Windows starts its own maximize preview).
-                var approach = Rectangle.FromLTRB(stripBounds.Left - (int)(160 * s), mon.Top, stripBounds.Right + (int)(160 * s), mon.Top + (int)(140 * s));
-                if (atEdge || approach.Contains(p)) ShowStrip(true, s);
-                else return;
+                if (!NearPill(screen, p, s, 220, 140)) return;
+                ShowStrip(true, s);
             }
-            if (!atEdge && !Rectangle.Inflate(stripBounds, (int)(56 * s), (int)(56 * s)).Contains(p))
+            else if (!NearPill(screen, p, s, 320, 230))
             {
                 if (preview.Visible) preview.Hide();
                 ShowStrip(false, s);
+                Log.Write("strip closed");
                 return;
             }
             if (strip.UpdateHot(p))
@@ -403,6 +483,14 @@ namespace SnapBar
                 if (strip.HotCard < 0) preview.Hide();
                 else preview.ShowZone(ZoneRect(stripScreen, strip.Layouts[strip.HotCard].Zones[strip.HotZone]), s, strip.Handle);
             }
+        }
+
+        // Within halfWidth of the pill's centre line and depth of the monitor's top edge (DIPs).
+        static bool NearPill(Screen screen, Point p, float s, int halfWidth, int depth)
+        {
+            var mon = screen.Bounds;
+            int cx = mon.Left + mon.Width * 2 / 3;
+            return Math.Abs(p.X - cx) <= halfWidth * s && p.Y <= mon.Top + depth * s;
         }
 
         static Rectangle ZoneRect(Screen screen, RectangleF f)
@@ -426,33 +514,41 @@ namespace SnapBar
             poll.Stop();
             var hwnd = dragged;
             dragged = IntPtr.Zero;
-            bool hot = strip.Visible && strip.Expanded && strip.HotCard >= 0;
+            bool hot = (strip.Visible || OverlayForm.NoUi) && strip.Expanded && strip.HotCard >= 0;
             Rectangle target = hot ? ZoneRect(stripScreen, strip.Layouts[strip.HotCard].Zones[strip.HotZone]) : Rectangle.Empty;
             HideOverlays();
             // Esc ends the move loop while the button is still held; leave that to Windows.
             bool cancelled = (Native.GetAsyncKeyState(0x01) & 0x8000) != 0;
-            Log.Write("drag end " + hwnd + " target " + (hot ? R(target) : "none") + (cancelled ? " cancelled" : ""));
+            Log.Write("drag end " + hwnd + " target " + (hot ? R(target) : "none") + (cancelled ? " cancelled" : "")); Log.Flush();
             if (!hot || cancelled) return;
             var t = new System.Windows.Forms.Timer { Interval = 40 };
-            t.Tick += delegate { t.Stop(); t.Dispose(); Place(hwnd, target); };
+            var ended = Stopwatch.StartNew();
+            t.Tick += delegate { t.Stop(); t.Dispose(); Log.Write("place after " + ended.ElapsedMilliseconds + "ms"); Place(hwnd, target); };
             t.Start();
         }
 
         // Positions the visible frame exactly on the target, compensating for DWM's invisible borders.
+        // Never blocks on the target application: the invisible-border insets are measured first,
+        // then restore and move are posted to the window's own thread (asynchronous requests).
         static void Place(IntPtr hwnd, Rectangle r)
         {
+            var sw = Stopwatch.StartNew();
             if (!Native.IsWindow(hwnd)) return;
-            if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
-            const uint flags = Native.SWP_NOZORDER | Native.SWP_NOACTIVATE;
-            Native.SetWindowPos(hwnd, IntPtr.Zero, r.Left, r.Top, r.Width, r.Height, flags);
+            int l = 0, t = 0, rr = 0, b = 0;
             Native.RECT win, frame;
-            if (Native.GetWindowRect(hwnd, out win) &&
+            if (!Native.IsZoomed(hwnd) && Native.GetWindowRect(hwnd, out win) &&
                 Native.DwmGetWindowAttribute(hwnd, Native.DWMWA_EXTENDED_FRAME_BOUNDS, out frame, Marshal.SizeOf(typeof(Native.RECT))) == 0)
             {
-                int l = frame.Left - win.Left, t = frame.Top - win.Top, rr = win.Right - frame.Right, b = win.Bottom - frame.Bottom;
-                Native.SetWindowPos(hwnd, IntPtr.Zero, r.Left - l, r.Top - t, r.Width + l + rr, r.Height + t + b, flags);
+                l = frame.Left - win.Left; t = frame.Top - win.Top; rr = win.Right - frame.Right; b = win.Bottom - frame.Bottom;
             }
-            Log.Write("placed " + hwnd + " at " + R(r));
+            else
+            {
+                Native.ShowWindowAsync(hwnd, Native.SW_RESTORE);
+                l = rr = b = (int)(7 * DpiScale(r.Location)); // standard Windows 10 invisible borders
+            }
+            Native.SetWindowPos(hwnd, IntPtr.Zero, r.Left - l, r.Top - t, r.Width + l + rr, r.Height + t + b,
+                Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_ASYNCWINDOWPOS);
+            Log.Write("placed " + hwnd + " at " + R(r) + " in " + sw.ElapsedMilliseconds + "ms"); Log.Flush();
         }
 
         static string R(Rectangle r) { return r.Left + "," + r.Top + "," + r.Width + "x" + r.Height; }
@@ -464,6 +560,7 @@ namespace SnapBar
         static void Main(string[] args)
         {
             if (Array.IndexOf(args, "--log") >= 0) Environment.SetEnvironmentVariable("SNAPBAR_LOG", "1");
+            OverlayForm.NoUi = Array.IndexOf(args, "--no-ui") >= 0;
             bool first;
             using (new Mutex(true, "Local\\SnapBar", out first))
             {
