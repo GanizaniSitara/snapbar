@@ -499,7 +499,7 @@ namespace SnapBar
             if (evt == Native.EVENT_SYSTEM_MOVESIZESTART)
             {
                 var root = Native.GetAncestor(hwnd, 2 /* GA_ROOT */);
-                if (IsSnappableMove(root)) { dragged = root; armed = false; dragStart = Cursor.Position;RawMouse.Recording = Log.Enabled; tick.Reset(); poll.Start(); Log.Write("drag start " + root); }
+                if (IsSnappableMove(root)) { dragged = root; armed = false; dragStart = Cursor.Position; RawMouse.Recording = Log.Enabled; tick.Reset(); poll.Start(); Log.Write("drag start " + root); }
             }
             else if (evt == Native.EVENT_SYSTEM_MOVESIZEEND && dragged != IntPtr.Zero)
             {
