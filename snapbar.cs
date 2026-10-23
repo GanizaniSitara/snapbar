@@ -451,10 +451,20 @@ namespace SnapBar
             Native.POINT np;
             Native.GetCursorPos(out np);
             var p = new Point(np.X, np.Y);
-            if (p != lastCursor) { Log.Write("cur " + p.X + "," + p.Y); lastCursor = p; }
             var screen = Screen.FromPoint(p);
             float s = DpiScale(p);
             lastScale = s;
+
+            // Nothing is shown (or logged) until the drag comes up near the top edge: an overlay
+            // appearing mid-drag makes every window drag on the desktop feel sluggish. The hide
+            // depth is larger than the show depth so the pill does not flap on the boundary.
+            bool shown = stripScreen != null;
+            if (p.Y > screen.Bounds.Top + (shown ? 280 : 200) * s)
+            {
+                if (shown) { HideOverlays(); Log.Write("strip hidden"); }
+                return;
+            }
+            if (p != lastCursor) { Log.Write("cur " + p.X + "," + p.Y); lastCursor = p; }
 
             // The hint pill follows the drag onto whichever monitor holds the cursor.
             if (stripScreen == null || !stripScreen.Equals(screen))
