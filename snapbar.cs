@@ -168,8 +168,8 @@ namespace SnapBar
     {
         public PreviewForm()
         {
-            BackColor = Color.FromArgb(76, 194, 255);
-            Opacity = 0.28;
+            BackColor = Color.FromArgb(0, 120, 212);
+            Opacity = 0.25;
         }
         public void ShowZone(Rectangle zone, float scale, IntPtr above)
         {
@@ -191,23 +191,30 @@ namespace SnapBar
     {
         public static GraphicsPath Round(Rectangle r, int radius)
         {
+            return Round(r, radius, true, true, true, true);
+        }
+
+        // Rounds only the chosen corners (top-left, top-right, bottom-right, bottom-left).
+        public static GraphicsPath Round(Rectangle r, int radius, bool tl, bool tr, bool br, bool bl)
+        {
             var p = new GraphicsPath();
             int d = Math.Max(2, radius * 2);
-            p.AddArc(r.Left, r.Top, d, d, 180, 90);
-            p.AddArc(r.Right - d, r.Top, d, d, 270, 90);
-            p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-            p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+            if (tl) p.AddArc(r.Left, r.Top, d, d, 180, 90); else p.AddLine(r.Left, r.Top, r.Left, r.Top);
+            if (tr) p.AddArc(r.Right - d, r.Top, d, d, 270, 90); else p.AddLine(r.Right, r.Top, r.Right, r.Top);
+            if (br) p.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90); else p.AddLine(r.Right, r.Bottom, r.Right, r.Bottom);
+            if (bl) p.AddArc(r.Left, r.Bottom - d, d, d, 90, 90); else p.AddLine(r.Left, r.Bottom, r.Left, r.Bottom);
             p.CloseFigure();
             return p;
         }
     }
 
-    // Windows 11-style snap bar: a small hint pill near the top while dragging, opening into a
-    // compact floating panel of layouts when the cursor comes up to it.
+    // Windows 11-style snap bar: a compact panel of layouts hanging from the top edge of the screen.
+    // Colours are sampled from Microsoft's own screenshot of the Windows 11 snap bar (light theme).
     class StripForm : OverlayForm
     {
-        static readonly Color Back = Color.FromArgb(44, 44, 44), Border = Color.FromArgb(80, 80, 80), Grip = Color.FromArgb(160, 160, 160),
-            ZoneFill = Color.FromArgb(105, 105, 105), Hot = Color.FromArgb(76, 194, 255);
+        static readonly Color Back = Color.FromArgb(238, 239, 240), Border = Color.FromArgb(200, 203, 206), Grip = Color.FromArgb(131, 138, 143),
+            ZoneFill = Color.FromArgb(212, 216, 220), ZoneEdge = Color.FromArgb(131, 138, 143),
+            Hot = Color.FromArgb(0, 120, 212), HotEdge = Color.FromArgb(0, 90, 170);
 
         public SnapLayout[] Layouts;
         public List<Rectangle[]> ZoneScreenRects = new List<Rectangle[]>(); // per card, in screen coords
@@ -246,7 +253,7 @@ namespace SnapBar
                 h = (int)(10 * scale);
             }
             int left = Math.Max(mon.Left, Math.Min(mon.Right - w, mon.Left + mon.Width * 2 / 3 - w / 2));
-            var bounds = new Rectangle(left, mon.Top + (int)(6 * scale), w, h);
+            var bounds = new Rectangle(left, mon.Top, w, h); // glued to the top edge
 
             int gap = Math.Max(2, (int)(3 * scale));
             for (int c = 0; expanded && c < Layouts.Length; c++)
@@ -264,7 +271,7 @@ namespace SnapBar
                 ZoneScreenRects.Add(zones);
             }
             if (Bounds != bounds) Bounds = bounds;
-            using (var path = Shapes.Round(new Rectangle(0, 0, w, h), (int)((expanded ? 8 : 5) * scale))) SetShape(path);
+            using (var path = Shapes.Round(new Rectangle(0, 0, w, h), (int)((expanded ? 8 : 5) * scale), false, false, true, true)) SetShape(path);
             Invalidate();
             return bounds;
         }
@@ -298,7 +305,7 @@ namespace SnapBar
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
             using (var pen = new Pen(Border, Math.Max(1, scale)))
-            using (var path = Shapes.Round(new Rectangle(0, 0, Width - 1, Height - 1), (int)((Expanded ? 8 : 5) * scale)))
+            using (var path = Shapes.Round(new Rectangle(0, -2, Width - 1, Height + 1), (int)((Expanded ? 8 : 5) * scale), false, false, true, true))
                 g.DrawPath(pen, path);
             if (!Expanded)
             {
@@ -306,11 +313,29 @@ namespace SnapBar
                 using (var b = new SolidBrush(Grip)) g.FillRectangle(b, (Width - gw) / 2, (Height - gh) / 2, gw, gh);
                 return;
             }
+            // As on Windows 11, each tile rounds only the corners on the outside of its layout.
+            int radius = (int)(4 * scale);
             for (int c = 0; c < CardScreenRects.Count; c++)
+            {
+                var card = CardScreenRects[c];
+                int slack = (int)(3 * scale);
                 for (int z = 0; z < ZoneScreenRects[c].Length; z++)
-                    using (var b = new SolidBrush(c == HotCard && z == HotZone ? Hot : ZoneFill))
-                    using (var path = Shapes.Round(ToClient(ZoneScreenRects[c][z]), (int)(3 * scale)))
+                {
+                    var zr = ZoneScreenRects[c][z];
+                    bool left = zr.Left - card.Left <= slack, right = card.Right - zr.Right <= slack;
+                    bool top = zr.Top - card.Top <= slack, bottom = card.Bottom - zr.Bottom <= slack;
+                    bool hot = c == HotCard && z == HotZone;
+                    var r = ToClient(zr);
+                    r.Width -= 1; r.Height -= 1;
+                    using (var b = new SolidBrush(hot ? Hot : ZoneFill))
+                    using (var pen = new Pen(hot ? HotEdge : ZoneEdge, Math.Max(1, scale)))
+                    using (var path = Shapes.Round(r, radius, top && left, top && right, bottom && right, bottom && left))
+                    {
                         g.FillPath(b, path);
+                        g.DrawPath(pen, path);
+                    }
+                }
+            }
         }
 
         Rectangle ToClient(Rectangle r) { return new Rectangle(r.Left - Left, r.Top - Top, r.Width, r.Height); }
