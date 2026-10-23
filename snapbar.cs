@@ -499,7 +499,7 @@ namespace SnapBar
             if (evt == Native.EVENT_SYSTEM_MOVESIZESTART)
             {
                 var root = Native.GetAncestor(hwnd, 2 /* GA_ROOT */);
-                if (IsSnappableMove(root)) { dragged = root; armed = false; RawMouse.Recording = Log.Enabled; tick.Reset(); poll.Start(); Log.Write("drag start " + root); }
+                if (IsSnappableMove(root)) { dragged = root; armed = false; dragStart = Cursor.Position;RawMouse.Recording = Log.Enabled; tick.Reset(); poll.Start(); Log.Write("drag start " + root); }
             }
             else if (evt == Native.EVENT_SYSTEM_MOVESIZEEND && dragged != IntPtr.Zero)
             {
@@ -533,6 +533,7 @@ namespace SnapBar
         Point lastCursor;
         float lastScale = 1;
         bool armed;
+        Point dragStart;
 
         void ShowStrip(bool expanded, float s)
         {
@@ -569,7 +570,8 @@ namespace SnapBar
             // the full panel opens straight away, anywhere across the screen. The hide depth is
             // larger than the show depth so the panel does not flap on the boundary.
             // A drag that starts inside the band (a title bar near the top) stays quiet until it
-            // has been below the band once, so grabbing a top-row window never pops the panel.
+            // has been below the band once, or has been pushed up to the top edge from where it
+            // was grabbed, so grabbing a top-row window never pops the panel by itself.
             if (p != lastCursor) { Log.Write("cur " + p.X + "," + p.Y); lastCursor = p; }
             bool shown = stripScreen != null;
             if (p.Y > screen.Bounds.Top + (shown ? 280 : 200) * s)
@@ -578,6 +580,8 @@ namespace SnapBar
                 if (shown) { HideOverlays(); Log.Write("strip hidden"); }
                 return;
             }
+            if (!armed && p.Y <= screen.Bounds.Top + 40 * s &&
+                Math.Abs(p.X - dragStart.X) + Math.Abs(p.Y - dragStart.Y) >= 40 * s) armed = true;
             if (!armed) return;
 
             // The panel follows the drag onto whichever monitor holds the cursor.
