@@ -104,11 +104,40 @@ namespace SnapBar
             for (int i = 0; i < Zones.Length; i++) Zones[i] = new RectangleF(v[i * 4], v[i * 4 + 1], v[i * 4 + 2], v[i * 4 + 3]);
         }
 
-        // Four-up only, on every monitor.
-        public static readonly SnapLayout[] Landscape = {
-            new SnapLayout(0,0,.5f,.5f, .5f,0,.5f,.5f, 0,.5f,.5f,.5f, .5f,.5f,.5f,.5f),
+        const float T = 1f / 3, TT = 2f / 3;
+        static readonly Dictionary<string, SnapLayout> Named = new Dictionary<string, SnapLayout>(StringComparer.OrdinalIgnoreCase) {
+            { "2x2",     new SnapLayout(0,0,.5f,.5f, .5f,0,.5f,.5f, 0,.5f,.5f,.5f, .5f,.5f,.5f,.5f) },
+            { "halves",  new SnapLayout(0,0,.5f,1, .5f,0,.5f,1) },
+            { "rows",    new SnapLayout(0,0,1,.5f, 0,.5f,1,.5f) },
+            { "thirds",  new SnapLayout(0,0,T,1, T,0,T,1, TT,0,T,1) },
+            { "2/3+1/3", new SnapLayout(0,0,TT,1, TT,0,T,1) },
+            { "1/3+2/3", new SnapLayout(0,0,T,1, T,0,TT,1) },
         };
-        public static readonly SnapLayout[] Portrait = Landscape;
+
+        // The layouts shown, in order, on every monitor: from snapbar.ini next to the exe
+        // ("layout = NAME" lines), or just 2x2 when the file is missing or names nothing known.
+        public static SnapLayout[] Landscape = { Named["2x2"] };
+        public static SnapLayout[] Portrait { get { return Landscape; } }
+
+        public static void Load()
+        {
+            var path = Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "snapbar.ini");
+            if (!File.Exists(path)) return;
+            var list = new List<SnapLayout>();
+            foreach (var raw in File.ReadAllLines(path))
+            {
+                var line = raw.Trim();
+                if (line.Length == 0 || line[0] == '#' || line[0] == ';') continue;
+                int eq = line.IndexOf('=');
+                if (eq < 0 || !line.Substring(0, eq).Trim().Equals("layout", StringComparison.OrdinalIgnoreCase)) continue;
+                var name = line.Substring(eq + 1).Trim();
+                SnapLayout l;
+                if (Named.TryGetValue(name, out l)) list.Add(l);
+                else Log.Write("snapbar.ini: unknown layout '" + name + "' (known: " + string.Join(", ", Named.Keys) + ")");
+            }
+            if (list.Count > 0) Landscape = list.ToArray();
+            Log.Write("layouts from snapbar.ini: " + list.Count);
+        }
     }
 
     // Borderless, click-through, never-activating topmost window.
@@ -574,6 +603,7 @@ namespace SnapBar
         {
             if (Array.IndexOf(args, "--log") >= 0) Environment.SetEnvironmentVariable("SNAPBAR_LOG", "1");
             OverlayForm.NoUi = Array.IndexOf(args, "--no-ui") >= 0;
+            SnapLayout.Load();
             bool first;
             using (new Mutex(true, "Local\\SnapBar", out first))
             {
