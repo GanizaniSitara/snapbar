@@ -41,6 +41,13 @@ namespace SnapBar
         [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr mon, int type, out uint x, out uint y);
         [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr hwnd, int attr, out RECT r, int size);
 
+        public delegate IntPtr HookProc(int code, IntPtr w, IntPtr l);
+        [StructLayout(LayoutKind.Sequential)] public struct MSLLHOOKSTRUCT { public POINT pt; public uint mouseData, flags, time; public IntPtr extra; }
+        [DllImport("user32.dll")] public static extern IntPtr SetWindowsHookEx(int id, HookProc proc, IntPtr mod, uint tid);
+        [DllImport("user32.dll")] public static extern IntPtr CallNextHookEx(IntPtr hook, int code, IntPtr w, IntPtr l);
+        [DllImport("kernel32.dll")] public static extern IntPtr GetModuleHandle(string name);
+        [DllImport("kernel32.dll")] public static extern uint GetTickCount();
+
         public const uint EVENT_SYSTEM_MOVESIZESTART = 0x000A, EVENT_SYSTEM_MOVESIZEEND = 0x000B;
         public const uint WINEVENT_OUTOFCONTEXT = 0, WINEVENT_SKIPOWNPROCESS = 2;
         public const uint SWP_NOZORDER = 0x4, SWP_NOACTIVATE = 0x10, SWP_NOMOVE = 0x2, SWP_NOSIZE = 0x1, SWP_ASYNCWINDOWPOS = 0x4000;
@@ -63,6 +70,13 @@ namespace SnapBar
         {
             if (path == null) return;
             buffer.Append(DateTime.Now.ToString("HH:mm:ss.fff ")).Append(msg).Append(Environment.NewLine);
+        }
+
+        // A line that already carries its own timestamp.
+        public static void WriteRaw(string line)
+        {
+            if (path == null) return;
+            buffer.Append(line).Append(Environment.NewLine);
         }
 
         static readonly System.Collections.Concurrent.ConcurrentQueue<string> pending = new System.Collections.Concurrent.ConcurrentQueue<string>();
@@ -91,6 +105,46 @@ namespace SnapBar
                     }
                 }
             });
+        }
+    }
+
+    // Debug (--log only): records raw mouse input during a drag, to tell a paused hand from late input.
+    // The low-level hook runs on its own thread so a busy UI thread can never delay system input.
+    // Each line: event position, the input's own timestamp, and how late the hook received it.
+    static class RawMouse
+    {
+        public static volatile bool Recording;
+        static readonly System.Collections.Concurrent.ConcurrentQueue<string> lines = new System.Collections.Concurrent.ConcurrentQueue<string>();
+        static Native.HookProc proc; // kept alive for the hook
+        static IntPtr hook;
+
+        public static void Start()
+        {
+            var t = new Thread(delegate ()
+            {
+                proc = Callback;
+                hook = Native.SetWindowsHookEx(14 /* WH_MOUSE_LL */, proc, Native.GetModuleHandle(null), 0);
+                Application.Run();
+            });
+            t.IsBackground = true;
+            t.Start();
+        }
+
+        static IntPtr Callback(int code, IntPtr w, IntPtr l)
+        {
+            if (code >= 0 && Recording && w.ToInt32() == 0x200 /* WM_MOUSEMOVE */)
+            {
+                var m = (Native.MSLLHOOKSTRUCT)Marshal.PtrToStructure(l, typeof(Native.MSLLHOOKSTRUCT));
+                lines.Enqueue(DateTime.Now.ToString("HH:mm:ss.fff ") + "raw " + m.pt.X + "," + m.pt.Y + " t=" + m.time + " late=" + unchecked((int)(Native.GetTickCount() - m.time)) + "ms");
+            }
+            return Native.CallNextHookEx(hook, code, w, l);
+        }
+
+        // Moves the recorded lines into the log (called on the UI thread at drag end).
+        public static void Drain()
+        {
+            string s;
+            while (lines.TryDequeue(out s)) Log.WriteRaw(s);
         }
     }
 
@@ -445,7 +499,7 @@ namespace SnapBar
             if (evt == Native.EVENT_SYSTEM_MOVESIZESTART)
             {
                 var root = Native.GetAncestor(hwnd, 2 /* GA_ROOT */);
-                if (IsSnappableMove(root)) { dragged = root; armed = false; tick.Reset(); poll.Start(); Log.Write("drag start " + root); }
+                if (IsSnappableMove(root)) { dragged = root; armed = false; RawMouse.Recording = Log.Enabled; tick.Reset(); poll.Start(); Log.Write("drag start " + root); }
             }
             else if (evt == Native.EVENT_SYSTEM_MOVESIZEEND && dragged != IntPtr.Zero)
             {
@@ -516,6 +570,7 @@ namespace SnapBar
             // larger than the show depth so the panel does not flap on the boundary.
             // A drag that starts inside the band (a title bar near the top) stays quiet until it
             // has been below the band once, so grabbing a top-row window never pops the panel.
+            if (p != lastCursor) { Log.Write("cur " + p.X + "," + p.Y); lastCursor = p; }
             bool shown = stripScreen != null;
             if (p.Y > screen.Bounds.Top + (shown ? 280 : 200) * s)
             {
@@ -524,7 +579,6 @@ namespace SnapBar
                 return;
             }
             if (!armed) return;
-            if (p != lastCursor) { Log.Write("cur " + p.X + "," + p.Y); lastCursor = p; }
 
             // The panel follows the drag onto whichever monitor holds the cursor.
             if (stripScreen == null || !stripScreen.Equals(screen))
@@ -559,6 +613,8 @@ namespace SnapBar
         void EndDrag()
         {
             poll.Stop();
+            RawMouse.Recording = false;
+            RawMouse.Drain();
             var hwnd = dragged;
             dragged = IntPtr.Zero;
             bool hot = (strip.Visible || OverlayForm.NoUi) && strip.Expanded && strip.HotCard >= 0;
@@ -615,6 +671,7 @@ namespace SnapBar
                 if (!first) return;
                 try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch (EntryPointNotFoundException) { }
                 Application.EnableVisualStyles();
+                if (Environment.GetEnvironmentVariable("SNAPBAR_LOG") == "1") RawMouse.Start();
                 Application.Run(new SnapBarContext());
             }
         }
