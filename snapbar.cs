@@ -456,8 +456,9 @@ namespace SnapBar
             lastScale = s;
 
             // Nothing is shown (or logged) until the drag comes up near the top edge: an overlay
-            // appearing mid-drag makes every window drag on the desktop feel sluggish. The hide
-            // depth is larger than the show depth so the pill does not flap on the boundary.
+            // appearing mid-drag makes every window drag on the desktop feel sluggish. Once there,
+            // the full panel opens straight away, anywhere across the screen. The hide depth is
+            // larger than the show depth so the panel does not flap on the boundary.
             bool shown = stripScreen != null;
             if (p.Y > screen.Bounds.Top + (shown ? 280 : 200) * s)
             {
@@ -466,41 +467,18 @@ namespace SnapBar
             }
             if (p != lastCursor) { Log.Write("cur " + p.X + "," + p.Y); lastCursor = p; }
 
-            // The hint pill follows the drag onto whichever monitor holds the cursor.
+            // The panel follows the drag onto whichever monitor holds the cursor.
             if (stripScreen == null || !stripScreen.Equals(screen))
             {
                 HideOverlays();
                 stripScreen = screen;
-                ShowStrip(false, s);
-            }
-
-            // Open when the cursor comes up near the pill; stay open within a strictly larger area.
-            // The close area must contain the open area, or the panel flaps open/shut every tick.
-            if (!strip.Expanded)
-            {
-                if (!NearPill(screen, p, s, 220, 140)) return;
                 ShowStrip(true, s);
-            }
-            else if (!NearPill(screen, p, s, 320, 230))
-            {
-                if (preview.Visible) preview.Hide();
-                ShowStrip(false, s);
-                Log.Write("strip closed");
-                return;
             }
             if (strip.UpdateHot(p))
             {
                 if (strip.HotCard < 0) preview.Hide();
                 else preview.ShowZone(ZoneRect(stripScreen, strip.Layouts[strip.HotCard].Zones[strip.HotZone]), s, strip.Handle);
             }
-        }
-
-        // Within halfWidth of the pill's centre line and depth of the monitor's top edge (DIPs).
-        static bool NearPill(Screen screen, Point p, float s, int halfWidth, int depth)
-        {
-            var mon = screen.Bounds;
-            int cx = mon.Left + mon.Width * 2 / 3;
-            return Math.Abs(p.X - cx) <= halfWidth * s && p.Y <= mon.Top + depth * s;
         }
 
         static Rectangle ZoneRect(Screen screen, RectangleF f)
